@@ -5,20 +5,34 @@ import socket
 import urllib.request
 import threading
 import time
+import os
+
+def get_ip():
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(('10.255.255.255', 1))
+        IP = s.getsockname()[0]
+    except Exception:
+        IP = '127.0.0.1'
+    finally:
+        s.close()
+    return IP
 
 def get_free_port():
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(('', 0))
         return s.getsockname()[1]
 
-def register_to_gateway(port, target):
+def register_to_gateway(host, port, target):
     time.sleep(1)
     try:
-        req = urllib.request.Request(f"http://127.0.0.1:5680/attach?port={port}", method="POST")
+        gateway_host = os.environ.get("DAP_GATEWAY_HOST", "127.0.0.1")
+        url = f"http://{gateway_host}:5680/attach?host={host}&port={port}"
+        req = urllib.request.Request(url, method="POST")
         urllib.request.urlopen(req)
-        print(f"[DAP Launcher] ✅ Successfully registered to Gateway (Port: {port})")
+        print(f"[DAP Launcher] ✅ Successfully registered to Gateway (Target: {host}:{port})")
     except Exception as e:
-        print(f"[DAP Launcher] ⚠️ Warning: Failed to connect to Gateway. Is port 5680 open? - {e}")
+        print(f"[DAP Launcher] ⚠️ Warning: Failed to connect to Gateway. - {e}")
 
 def launch():
     if len(sys.argv) < 2:
@@ -28,17 +42,19 @@ def launch():
     target = sys.argv[1]
     port = get_free_port()
     
+    host = os.environ.get("DAP_HOST", get_ip())
+    
     print("==================================================")
     print(f" [DAP Launcher] 🚀 Launching target: {target}")
-    print(f" [DAP Launcher] 💉 Injecting DAP Probe (Port: {port})...")
+    print(f" [DAP Launcher] 💉 Listening on 0.0.0.0:{port}")
+    print(f" [DAP Launcher] 🔗 Registered at: {host}:{port}")
     print("==================================================")
     
-    debugpy.listen(("127.0.0.1", port))
-    threading.Thread(target=register_to_gateway, args=(port, target), daemon=True).start()
+    debugpy.listen(("0.0.0.0", port))
+    threading.Thread(target=register_to_gateway, args=(host, port, target), daemon=True).start()
     
     sys.argv = sys.argv[1:]
     
-    # Monkey Patching to bypass any residual debugpy calls in target code
     class DummyDebugpy:
         def wait_for_client(self): pass
         def breakpoint(self): pass

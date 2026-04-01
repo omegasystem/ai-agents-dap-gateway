@@ -9,10 +9,12 @@ from urllib.parse import urlparse, parse_qs
 
 class AsyncDAPClient:
     """非同步 DAP Client (每個 Target 一個實例)"""
-    def __init__(self, port):
+    def __init__(self, host, port):
+        self.host = host
         self.port = port
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.sock.connect(("127.0.0.1", port))
+        print(f"[*] Connecting to DAP Target at {host}:{port}...")
+        self.sock.connect((host, port))
         self.seq = 1
         self.responses = {}
         self.events = Queue()
@@ -141,23 +143,25 @@ class AsyncDAPClient:
 
 class DAPGatewayManager:
     def __init__(self):
-        self.sessions = {}
+        self.sessions = {} # (host, port) -> AsyncDAPClient
 
-    def attach(self, port):
-        if port in self.sessions:
-            return {"status": "error", "message": f"Port {port} already attached"}
+    def attach(self, host, port):
+        key = f"{host}:{port}"
+        if key in self.sessions:
+            return {"status": "error", "message": f"Target {key} already attached"}
         try:
-            client = AsyncDAPClient(port)
-            self.sessions[port] = client
-            return {"status": "success", "message": f"Attached to {port}"}
+            client = AsyncDAPClient(host, port)
+            self.sessions[key] = client
+            return {"status": "success", "message": f"Attached to {key}"}
         except Exception as e:
             return {"status": "error", "message": str(e)}
 
-    def detach(self, port):
-        if port in self.sessions:
-            self.sessions[port].close()
-            del self.sessions[port]
-            return {"status": "success", "message": f"Detached from {port}"}
+    def detach(self, host, port):
+        key = f"{host}:{port}"
+        if key in self.sessions:
+            self.sessions[key].close()
+            del self.sessions[key]
+            return {"status": "success", "message": f"Detached from {key}"}
         return {"status": "error", "message": "Not attached"}
 
 gateway = DAPGatewayManager()
@@ -167,18 +171,21 @@ class GatewayAPIHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         qs = parse_qs(parsed.query)
         port = int(qs.get('port', [0])[0])
+        host = qs.get('host', ['127.0.0.1'])[0]
         
         if parsed.path == '/attach' and port:
-            res = gateway.attach(port)
+            res = gateway.attach(host, port)
         elif parsed.path == '/detach' and port:
-            res = gateway.detach(port)
+            res = gateway.detach(host, port)
         elif parsed.path == '/pause' and port:
-            if port in gateway.sessions:
-                res = {"status": "success"} if gateway.sessions[port].pause() else {"status": "error"}
+            key = f"{host}:{port}"
+            if key in gateway.sessions:
+                res = {"status": "success"} if gateway.sessions[key].pause() else {"status": "error"}
             else: res = {"status": "error", "message": "Not attached"}
         elif parsed.path == '/resume' and port:
-            if port in gateway.sessions:
-                res = {"status": "success"} if gateway.sessions[port].resume() else {"status": "error"}
+            key = f"{host}:{port}"
+            if key in gateway.sessions:
+                res = {"status": "success"} if gateway.sessions[key].resume() else {"status": "error"}
             else: res = {"status": "error", "message": "Not attached"}
         else:
             self.send_response(404)
@@ -194,10 +201,12 @@ class GatewayAPIHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         qs = parse_qs(parsed.query)
         port = int(qs.get('port', [0])[0])
+        host = qs.get('host', ['127.0.0.1'])[0]
         
         if parsed.path == '/snapshot' and port:
-            if port in gateway.sessions:
-                client = gateway.sessions[port]
+            key = f"{host}:{port}"
+            if key in gateway.sessions:
+                client = gateway.sessions[key]
                 client.pause()
                 data = client.get_snapshot()
                 client.resume()
