@@ -225,6 +225,7 @@ class GatewayAPIHandler(BaseHTTPRequestHandler):
             qs = parse_qs(parsed.query)
             port = int(qs.get('port', [0])[0])
             host = qs.get('host', ['127.0.0.1'])[0]
+            snapshot_flag = qs.get('snapshot', ['false'])[0].lower() == 'true'
             key = f"{host}:{port}"
             if parsed.path == '/events' and port:
                 self.send_response(200)
@@ -241,7 +242,13 @@ class GatewayAPIHandler(BaseHTTPRequestHandler):
                     while True:
                         try:
                             event_msg = q.get(timeout=30)
-                            payload = f"data: {json.dumps(event_msg)}\n\n"
+                            if snapshot_flag and event_msg.get('event') == 'stopped':
+                                with gateway.lock:
+                                    client = gateway.sessions.get(key)
+                                if client:
+                                    event_msg['snapshot'] = client.get_snapshot()
+                                    
+                            payload = f"data: {json.dumps(event_msg, ensure_ascii=False)}\n\n"
                             self.wfile.write(payload.encode('utf-8'))
                             self.wfile.flush()
                         except Empty:
@@ -287,7 +294,8 @@ class GatewayAPIHandler(BaseHTTPRequestHandler):
 
 def run():
     print("==================================================")
-    print(" [AI Agent DAP Gateway] Multi-threaded v1.5")
+    print(" [AI Agent DAP Gateway] Multi-threaded v1.6")
+    print(" 🚀 SSE supports ?snapshot=true for auto-capture")
     print("==================================================")
     server = ThreadingHTTPServer(('0.0.0.0', 5680), GatewayAPIHandler)
     try: server.serve_forever()
