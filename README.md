@@ -9,9 +9,10 @@ AI coding agents (like Claude-Code, OpenClaw, or AutoGPT) cannot natively intera
 ## 💡 The Solution: Debugger as a Service (DaaS)
 **AI Agent DAP Gateway** turns debugging into a REST API. 
 1. **Zero-Intrusion**: Wrap any pure Python script using the Launcher. No `import debugpy` needed in your business logic.
-2. **Monkey Patching**: Automatically bypasses legacy `debugpy.wait_for_client()` calls in target scripts.
-3. **Multi-Target Mesh**: Run the Gateway once, launch multiple targets, and manage them all via simple `HTTP GET/POST` requests.
-4. **Time-Stop Snapshotting**: Freeze the execution thread, extract all local variables as a clean JSON payload, and resume execution—all in milliseconds.
+2. **Distributed Mesh**: Support for cross-machine debugging. Gateway and targets can run on different hosts (Windows/Linux/WSL) via auto-IP registration.
+3. **SSE Real-Time Push**: Active event streaming for breakpoint hits. No polling required.
+4. **Multi-Threaded Concurrency**: Handle multiple SSE listeners and API calls simultaneously.
+5. **Time-Stop Snapshotting**: Freeze the execution thread, extract all local variables as a clean JSON payload, and resume execution—all in milliseconds.
 
 ---
 
@@ -29,45 +30,48 @@ python3 dap_gateway.py
 ```
 
 ### 3. Launch a Target Script (The "Probe")
-Instead of running `python3 example_target.py`, run it through the Launcher. It will automatically find a free port, inject `debugpy`, and register itself to the Gateway.
+The Launcher will automatically find a free port, listen on `0.0.0.0`, detect its own IP, and register itself to the Gateway.
 ```bash
 python3 dap_launcher.py example_target.py
 ```
-*(Output will show the dynamically assigned DAP Port, e.g., 45123)*
+*(Optionally use `DAP_GATEWAY_HOST` to specify the Gateway address)*
 
-### 4. Extract Runtime Variables (The "God Mode")
-Now, let your AI Agent (or yourself) run a simple `curl` command to extract the local variables of the running script.
+### 4. Real-Time Event Listening (The "Nervous System")
+Subscribe to real-time events (SSE). When a breakpoint is hit, the Gateway pushes the notification instantly. Use `snapshot=true` for automatic variable capture.
 
 ```bash
-curl http://127.0.0.1:5680/snapshot?port=45123
+curl -N -H "Accept: text/event-stream" "http://127.0.0.1:5680/events?host=127.0.0.1&port=45123&snapshot=true"
 ```
 
-**Response Example:**
-```json
-{
-  "status": "success",
-  "snapshot": {
-    "step": 42,
-    "entropy_level": 185.3,
-    "world_state": "Chaos"
-  }
-}
+### 5. Extract Runtime Variables (The "God Mode")
+Manually extract the local variables of the running script via a simple `curl` command.
+
+```bash
+curl http://127.0.0.1:5680/snapshot?host=127.0.0.1&port=45123
 ```
 
 ---
 
 ## 📡 API Endpoints (Port 5680)
 
-All endpoints require the `?port=<DAP_PORT>` query parameter (except `/status`).
+All endpoints (except `/status`) support `?host=<TARGET_IP>` and `?port=<DAP_PORT>`.
 
 | Method | Endpoint | Description |
 | :--- | :--- | :--- |
-| `GET` | `/status` | List all active attached sessions (ports). |
-| `POST` | `/attach` | Manually attach the Gateway to a listening debugpy port. |
+| `GET` | `/status` | List all active attached sessions. |
+| `GET` | `/events` | **SSE Stream**. Pushes real-time events like `stopped`. Supports `?snapshot=true`. |
+| `POST` | `/attach` | Manually attach the Gateway to a remote listening debugpy port. |
 | `POST` | `/detach` | Disconnect the Gateway from the target. |
 | `POST` | `/pause` | Freeze the target execution thread (Time Stop). |
 | `POST` | `/resume` | Resume the target execution thread. |
-| `GET` | `/snapshot` | **Auto-Sequence**: Pauses, extracts local variables, and resumes immediately. Returns a JSON snapshot. |
+| `GET` | `/snapshot` | **Auto-Sequence**: Pauses, extracts local variables, and resumes immediately. |
+
+---
+
+## 🏗️ Distributed Architecture
+The Gateway is now designed for distributed environments:
+- **`dap_launcher.py`**: Listens on `0.0.0.0` to allow remote connections. Automatically detects the host IP for registration.
+- **`dap_gateway.py`**: Uses `ThreadingHTTPServer` for non-blocking concurrent request handling (perfect for Cloudflare Zero Trust tunnels).
 
 ---
 
