@@ -3,15 +3,16 @@ import json
 import time
 import sys
 import threading
-from queue import Queue
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from queue import Queue, Empty
+from http.server import HTTPServer, BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
 class AsyncDAPClient:
-    """非同步 DAP Client (每個 Target 一個實例)"""
-    def __init__(self, host, port):
+    """Async DAP Client (one instance per target)"""
+    def __init__(self, host, port, event_callback=None):
         self.host = host
         self.port = port
+        self.event_callback = event_callback
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         print(f"[*] Connecting to DAP Target at {host}:{port}...")
         self.sock.connect((host, port))
@@ -55,6 +56,8 @@ class AsyncDAPClient:
                     self.responses[msg.get("request_seq")] = msg
                 elif msg.get("type") == "event":
                     self.events.put(msg)
+                    if self.event_callback and msg.get("event") == "stopped":
+                        self.event_callback(self.host, self.port, msg)
             except Exception:
                 break
 
@@ -96,7 +99,7 @@ class AsyncDAPClient:
     def get_thread_id(self):
         seq_threads = self.send("threads")
         resp = self.wait_for_response(seq_threads)
-        if resp and resp["body"]["threads"]:
+        if resp and resp.get("success") and resp["body"]["threads"]:
             return resp["body"]["threads"][0]["id"]
         return None
 
@@ -116,24 +119,28 @@ class AsyncDAPClient:
         return False
 
     def get_snapshot(self):
-        tid = self.get_thread_id()
-        if not tid: return {"error": "No thread found"}
-        
-        seq_st = self.send("stackTrace", {"threadId": tid})
-        st_resp = self.wait_for_response(seq_st)
-        if not st_resp or not st_resp["body"]["stackFrames"]:
-            return {"error": "No stack frame. Is it paused?"}
-            
-        frame_id = st_resp["body"]["stackFrames"][0]["id"]
-        
-        seq_scopes = self.send("scopes", {"frameId": frame_id})
-        loc_ref = self.wait_for_response(seq_scopes)["body"]["scopes"][0]["variablesReference"]
-        
-        seq_vars = self.send("variables", {"variablesReference": loc_ref})
-        variables = self.wait_for_response(seq_vars)["body"]["variables"]
-        
-        snapshot = {v['name']: v['value'] for v in variables if not v['name'].startswith('__')}
-        return snapshot
+        try:
+            tid = self.get_thread_id()
+            if not tid: return {"error": "No thread found"}
+            seq_st = self.send("stackTrace", {"threadId": tid})
+            st_resp = self.wait_for_response(seq_st)
+            if not st_resp or not st_resp.get("success") or not st_resp.get("body", {}).get("stackFrames"):
+                return {"error": "No stack frame. Is it paused?"}
+            frame_id = st_resp["body"]["stackFrames"][0]["id"]
+            seq_scopes = self.send("scopes", {"frameId": frame_id})
+            scopes_resp = self.wait_for_response(seq_scopes)
+            if not scopes_resp or not scopes_resp.get("success"):
+                return {"error": "Failed to get scopes"}
+            loc_ref = scopes_resp["body"]["scopes"][0]["variablesReference"]
+            seq_vars = self.send("variables", {"variablesReference": loc_ref})
+            vars_resp = self.wait_for_response(seq_vars)
+            if not vars_resp or not vars_resp.get("success"):
+                return {"error": "Failed to get variables"}
+            variables = vars_resp["body"]["variables"]
+            snapshot = {v['name']: v['value'] for v in variables if not v['name'].startswith('__')}
+            return snapshot
+        except Exception as e:
+            return {"error": f"Snapshot internal error: {str(e)}"}
 
     def close(self):
         self.running = False
@@ -143,96 +150,146 @@ class AsyncDAPClient:
 
 class DAPGatewayManager:
     def __init__(self):
-        self.sessions = {} # (host, port) -> AsyncDAPClient
+        self.sessions = {}
+        self.event_queues = {}
+        self.lock = threading.Lock()
+
+    def _broadcast_event(self, host, port, event_msg):
+        key = f"{host}:{port}"
+        with self.lock:
+            if key in self.event_queues:
+                for q in self.event_queues[key]:
+                    q.put(event_msg)
 
     def attach(self, host, port):
         key = f"{host}:{port}"
-        if key in self.sessions:
-            return {"status": "error", "message": f"Target {key} already attached"}
+        with self.lock:
+            if key in self.sessions:
+                return {"status": "error", "message": f"Target {key} already attached"}
         try:
-            client = AsyncDAPClient(host, port)
-            self.sessions[key] = client
+            client = AsyncDAPClient(host, port, event_callback=self._broadcast_event)
+            with self.lock:
+                self.sessions[key] = client
             return {"status": "success", "message": f"Attached to {key}"}
         except Exception as e:
             return {"status": "error", "message": str(e)}
 
     def detach(self, host, port):
         key = f"{host}:{port}"
-        if key in self.sessions:
-            self.sessions[key].close()
-            del self.sessions[key]
-            return {"status": "success", "message": f"Detached from {key}"}
+        with self.lock:
+            if key in self.sessions:
+                self.sessions[key].close()
+                del self.sessions[key]
+                return {"status": "success", "message": f"Detached from {key}"}
         return {"status": "error", "message": "Not attached"}
 
 gateway = DAPGatewayManager()
 
 class GatewayAPIHandler(BaseHTTPRequestHandler):
     def do_POST(self):
-        parsed = urlparse(self.path)
-        qs = parse_qs(parsed.query)
-        port = int(qs.get('port', [0])[0])
-        host = qs.get('host', ['127.0.0.1'])[0]
-        
-        if parsed.path == '/attach' and port:
-            res = gateway.attach(host, port)
-        elif parsed.path == '/detach' and port:
-            res = gateway.detach(host, port)
-        elif parsed.path == '/pause' and port:
-            key = f"{host}:{port}"
-            if key in gateway.sessions:
-                res = {"status": "success"} if gateway.sessions[key].pause() else {"status": "error"}
-            else: res = {"status": "error", "message": "Not attached"}
-        elif parsed.path == '/resume' and port:
-            key = f"{host}:{port}"
-            if key in gateway.sessions:
-                res = {"status": "success"} if gateway.sessions[key].resume() else {"status": "error"}
-            else: res = {"status": "error", "message": "Not attached"}
-        else:
-            self.send_response(404)
+        try:
+            parsed = urlparse(self.path)
+            qs = parse_qs(parsed.query)
+            port = int(qs.get('port', [0])[0])
+            host = qs.get('host', ['127.0.0.1'])[0]
+            if parsed.path == '/attach' and port:
+                res = gateway.attach(host, port)
+            elif parsed.path == '/detach' and port:
+                res = gateway.detach(host, port)
+            elif parsed.path == '/pause' and port:
+                key = f"{host}:{port}"
+                with gateway.lock:
+                    client = gateway.sessions.get(key)
+                res = {"status": "success"} if client and client.pause() else {"status": "error"}
+            elif parsed.path == '/resume' and port:
+                key = f"{host}:{port}"
+                with gateway.lock:
+                    client = gateway.sessions.get(key)
+                res = {"status": "success"} if client and client.resume() else {"status": "error"}
+            else:
+                self.send_response(404)
+                self.end_headers()
+                return
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json')
             self.end_headers()
-            return
-
-        self.send_response(200)
-        self.send_header('Content-type', 'application/json')
-        self.end_headers()
-        self.wfile.write(json.dumps(res).encode('utf-8'))
+            self.wfile.write(json.dumps(res).encode('utf-8'))
+        except Exception as e:
+            self.send_response(500)
+            self.end_headers()
+            self.wfile.write(json.dumps({"status": "error", "message": str(e)}).encode('utf-8'))
 
     def do_GET(self):
-        parsed = urlparse(self.path)
-        qs = parse_qs(parsed.query)
-        port = int(qs.get('port', [0])[0])
-        host = qs.get('host', ['127.0.0.1'])[0]
-        
-        if parsed.path == '/snapshot' and port:
+        try:
+            parsed = urlparse(self.path)
+            qs = parse_qs(parsed.query)
+            port = int(qs.get('port', [0])[0])
+            host = qs.get('host', ['127.0.0.1'])[0]
             key = f"{host}:{port}"
-            if key in gateway.sessions:
-                client = gateway.sessions[key]
-                client.pause()
-                data = client.get_snapshot()
-                client.resume()
-                res = {"status": "success", "snapshot": data}
+            if parsed.path == '/events' and port:
+                self.send_response(200)
+                self.send_header('Content-type', 'text/event-stream')
+                self.send_header('Cache-Control', 'no-cache')
+                self.send_header('Connection', 'keep-alive')
+                self.end_headers()
+                q = Queue()
+                with gateway.lock:
+                    if key not in gateway.event_queues:
+                        gateway.event_queues[key] = []
+                    gateway.event_queues[key].append(q)
+                try:
+                    while True:
+                        try:
+                            event_msg = q.get(timeout=30)
+                            payload = f"data: {json.dumps(event_msg)}\n\n"
+                            self.wfile.write(payload.encode('utf-8'))
+                            self.wfile.flush()
+                        except Empty:
+                            self.wfile.write(b": keep-alive\n\n")
+                            self.wfile.flush()
+                except (ConnectionResetError, BrokenPipeError):
+                    pass
+                finally:
+                    with gateway.lock:
+                        if key in gateway.event_queues:
+                            gateway.event_queues[key].remove(q)
+                return
+            elif parsed.path == '/snapshot' and port:
+                with gateway.lock:
+                    client = gateway.sessions.get(key)
+                if client:
+                    if client.pause():
+                        data = client.get_snapshot()
+                        client.resume()
+                        res = {"status": "success", "snapshot": data}
+                    else:
+                        res = {"status": "error", "message": "Pause failed"}
+                else:
+                    res = {"status": "error", "message": "Not attached"}
+            elif parsed.path == '/status':
+                with gateway.lock:
+                    res = {"status": "running", "sessions": list(gateway.sessions.keys())}
             else:
-                res = {"status": "error", "message": "Not attached"}
-        elif parsed.path == '/status':
-            res = {"status": "running", "sessions": list(gateway.sessions.keys())}
-        else:
-            self.send_response(404)
+                self.send_response(404)
+                self.end_headers()
+                return
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json')
             self.end_headers()
-            return
-            
-        self.send_response(200)
-        self.send_header('Content-type', 'application/json')
-        self.end_headers()
-        self.wfile.write(json.dumps(res, ensure_ascii=False).encode('utf-8'))
+            self.wfile.write(json.dumps(res, ensure_ascii=False).encode('utf-8'))
+        except Exception as e:
+            self.send_response(500)
+            self.end_headers()
+            self.wfile.write(json.dumps({"status": "error", "message": str(e)}).encode('utf-8'))
 
     def log_message(self, format, *args):
         pass
 
 def run():
     print("==================================================")
-    print(" [AI Agent DAP Gateway] Started (Port 5680)")
+    print(" [AI Agent DAP Gateway] Multi-threaded v1.5")
     print("==================================================")
-    server = HTTPServer(('0.0.0.0', 5680), GatewayAPIHandler)
+    server = ThreadingHTTPServer(('0.0.0.0', 5680), GatewayAPIHandler)
     try: server.serve_forever()
     except KeyboardInterrupt: sys.exit(0)
 
