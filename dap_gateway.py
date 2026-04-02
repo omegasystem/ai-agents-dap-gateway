@@ -182,6 +182,26 @@ class AsyncDAPClient:
             return resp["body"]["threads"][0]["id"]
         return None
 
+    def set_breakpoint(self, file_path, lines):
+        """在指定檔案的多個行號設置斷點，回傳 DAP 確認的斷點列表。"""
+        seq = self.send("setBreakpoints", {
+            "source": {"path": file_path},
+            "breakpoints": [{"line": l} for l in lines],
+        })
+        resp = self.wait_for_response(seq)
+        if resp and resp.get("success"):
+            return resp["body"].get("breakpoints", [])
+        return None
+
+    def clear_breakpoints(self, file_path):
+        """清除指定檔案的所有斷點（傳空列表）。"""
+        seq = self.send("setBreakpoints", {
+            "source": {"path": file_path},
+            "breakpoints": [],
+        })
+        resp = self.wait_for_response(seq)
+        return resp is not None and resp.get("success", False)
+
     def pause(self):
         tid = self.get_thread_id()
         if tid:
@@ -418,6 +438,51 @@ class GatewayAPIHandler(BaseHTTPRequestHandler):
                                 res = {"status": "success", "stopped": stopped, "threadId": tid}
                             else:
                                 res = {"status": "error", "message": "Timed out waiting for stopped event"}
+
+            elif parsed.path == '/breakpoint' and port:
+                # POST /breakpoint?host=...&port=...&file=<path>&lines=10,20,30
+                file_path = qs.get('file', [None])[0]
+                lines_raw = qs.get('lines', [None])[0]
+                if not file_path or not lines_raw:
+                    res = {"status": "error", "message": "file and lines required"}
+                else:
+                    try:
+                        lines = [int(l.strip()) for l in lines_raw.split(',') if l.strip()]
+                    except ValueError:
+                        res = {"status": "error", "message": "lines must be comma-separated integers"}
+                    else:
+                        with gateway.lock:
+                            client = gateway.sessions.get(key)
+                        if not client:
+                            res = {"status": "error", "message": "Not attached"}
+                        else:
+                            confirmed = client.set_breakpoint(file_path, lines)
+                            if confirmed is not None:
+                                # 快取至 session_meta 供 GET /breakpoints 查詢
+                                with gateway.lock:
+                                    gateway.session_meta.setdefault(key, {}) \
+                                        .setdefault("breakpoints", {})[file_path] = confirmed
+                                res = {"status": "success", "breakpoints": confirmed}
+                            else:
+                                res = {"status": "error", "message": "setBreakpoints failed"}
+
+            elif parsed.path == '/breakpoint/clear' and port:
+                # POST /breakpoint/clear?host=...&port=...&file=<path>
+                file_path = qs.get('file', [None])[0]
+                if not file_path:
+                    res = {"status": "error", "message": "file required"}
+                else:
+                    with gateway.lock:
+                        client = gateway.sessions.get(key)
+                    if not client:
+                        res = {"status": "error", "message": "Not attached"}
+                    else:
+                        ok = client.clear_breakpoints(file_path)
+                        if ok:
+                            with gateway.lock:
+                                gateway.session_meta.get(key, {}).get("breakpoints", {}).pop(file_path, None)
+                        res = {"status": "success"} if ok else {"status": "error", "message": "clearBreakpoints failed"}
+
             else:
                 self.send_response(404)
                 self.end_headers()
@@ -535,6 +600,24 @@ class GatewayAPIHandler(BaseHTTPRequestHandler):
                     else:
                         expanded = client.expand_ref(int(ref))
                         res = {"status": "success", "variables": expanded}
+
+            elif parsed.path == '/breakpoints' and port:
+                # GET /breakpoints?host=...&port=...&file=<path>
+                # 回傳目前 DAP 端確認生效的斷點（重新 setBreakpoints 以查詢）
+                file_path = qs.get('file', [None])[0]
+                if not file_path:
+                    res = {"status": "error", "message": "file required"}
+                else:
+                    with gateway.lock:
+                        client = gateway.sessions.get(key)
+                    if not client:
+                        res = {"status": "error", "message": "Not attached"}
+                    else:
+                        # DAP 無原生 getBreakpoints，用 session_meta 快取
+                        bp_key = f"{key}:breakpoints:{file_path}"
+                        cached = gateway.session_meta.get(key, {}).get("breakpoints", {})
+                        res = {"status": "success", "file": file_path,
+                               "breakpoints": cached.get(file_path, [])}
 
             elif parsed.path == '/sessions':
                 with gateway.lock:

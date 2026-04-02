@@ -111,7 +111,24 @@ Variables containing objects/dicts/lists are marked with `__expandable__: true` 
 curl "http://127.0.0.1:5680/expand?host=127.0.0.1&port=45123&ref=1234"
 ```
 
-### 7. Step Execution (The "Single Frame Advance")
+### 7. Breakpoint Management
+
+Set precise breakpoints at specific file/line combinations. The process will automatically stop and emit a `stopped` event when execution hits a breakpoint.
+
+```bash
+# Set breakpoints at lines 10 and 14 of a target script
+curl -X POST "http://127.0.0.1:5680/breakpoint?host=127.0.0.1&port=45123&file=/abs/path/example_target.py&lines=10,14"
+
+# List currently set breakpoints for a file
+curl "http://127.0.0.1:5680/breakpoints?host=127.0.0.1&port=45123&file=/abs/path/example_target.py"
+
+# Clear all breakpoints in a file
+curl -X POST "http://127.0.0.1:5680/breakpoint/clear?host=127.0.0.1&port=45123&file=/abs/path/example_target.py"
+```
+
+> Once a breakpoint is hit, the SSE stream will emit a `stopped` event with `reason: "breakpoint"`. You can then call `/snapshot` or start stepping.
+
+### 8. Step Execution (The "Single Frame Advance")
 
 `threadId` is optional — the gateway auto-fetches it if omitted.
 
@@ -166,6 +183,9 @@ All endpoints (except `/status`) support `?host=<TARGET_IP>` and `?port=<DAP_POR
 | `POST` | `/step/over` | Step over — execute next line. `?threadId` optional (auto-fetched). Process must be paused. Do NOT call `/snapshot` between steps. |
 | `POST` | `/step/in` | Step into — enter the next function call. `?threadId` optional. |
 | `POST` | `/step/out` | Step out — exit the current function. `?threadId` optional. |
+| `POST` | `/breakpoint` | Set breakpoints. Requires `?file=<abs_path>&lines=10,20,30`. Returns DAP-confirmed breakpoint list. |
+| `POST` | `/breakpoint/clear` | Clear all breakpoints in a file. Requires `?file=<abs_path>`. |
+| `GET` | `/breakpoints` | List currently set breakpoints for a file. Requires `?file=<abs_path>`. |
 
 ---
 
