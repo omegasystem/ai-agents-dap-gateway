@@ -113,16 +113,38 @@ curl "http://127.0.0.1:5680/expand?host=127.0.0.1&port=45123&ref=1234"
 
 ### 7. Step Execution (The "Single Frame Advance")
 
+`threadId` is optional — the gateway auto-fetches it if omitted.
+
 ```bash
 # Step over (next line)
-curl -X POST "http://127.0.0.1:5680/step/over?host=127.0.0.1&port=45123&threadId=1"
+curl -X POST "http://127.0.0.1:5680/step/over?host=127.0.0.1&port=45123"
 
 # Step into function
-curl -X POST "http://127.0.0.1:5680/step/in?host=127.0.0.1&port=45123&threadId=1"
+curl -X POST "http://127.0.0.1:5680/step/in?host=127.0.0.1&port=45123"
 
 # Step out of function
-curl -X POST "http://127.0.0.1:5680/step/out?host=127.0.0.1&port=45123&threadId=1"
+curl -X POST "http://127.0.0.1:5680/step/out?host=127.0.0.1&port=45123"
 ```
+
+> ⚠️ **Important: Step Execution Flow**
+>
+> `/snapshot` internally calls `pause → get_vars → **resume**`. This means calling `/snapshot` between steps will inadvertently resume the process, causing the next `/step/*` to time out.
+>
+> **Correct pattern** — pause once, step multiple times, snapshot at the end:
+> ```bash
+> # 1. Freeze the process
+> curl -X POST ".../pause?port=45123"
+>
+> # 2. Step through lines (process stays paused between steps)
+> curl -X POST ".../step/over?port=45123"
+> curl -X POST ".../step/over?port=45123"
+> curl -X POST ".../step/over?port=45123"
+>
+> # 3. Read variables after stepping (this will resume the process)
+> curl ".../snapshot?port=45123"
+> ```
+>
+> To read variables **without resuming**, use `/expand` with a known `__ref__` ID instead of `/snapshot`.
 
 ---
 
@@ -141,9 +163,9 @@ All endpoints (except `/status`) support `?host=<TARGET_IP>` and `?port=<DAP_POR
 | `POST` | `/resume` | Resume the target execution thread. |
 | `GET` | `/snapshot` | **Auto-Sequence**: Pauses, extracts local variables (with expandable markers), and resumes immediately. |
 | `GET` | `/expand` | Expand one level of an expandable variable by `?ref=<id>`. Requires target to be paused. |
-| `POST` | `/step/over` | Step over — execute next line. Requires `?threadId=<id>`. |
-| `POST` | `/step/in` | Step into — enter the next function call. Requires `?threadId=<id>`. |
-| `POST` | `/step/out` | Step out — exit the current function. Requires `?threadId=<id>`. |
+| `POST` | `/step/over` | Step over — execute next line. `?threadId` optional (auto-fetched). Process must be paused. Do NOT call `/snapshot` between steps. |
+| `POST` | `/step/in` | Step into — enter the next function call. `?threadId` optional. |
+| `POST` | `/step/out` | Step out — exit the current function. `?threadId` optional. |
 
 ---
 
