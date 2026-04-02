@@ -401,21 +401,23 @@ class GatewayAPIHandler(BaseHTTPRequestHandler):
                     '/step/out': 'stepOut',
                 }
                 dap_cmd = step_map[parsed.path]
-                thread_id = qs.get('threadId', [None])[0]
-                if not thread_id:
-                    res = {"status": "error", "message": "threadId required"}
+                with gateway.lock:
+                    client = gateway.sessions.get(key)
+                if not client:
+                    res = {"status": "error", "message": "Not attached"}
                 else:
-                    with gateway.lock:
-                        client = gateway.sessions.get(key)
-                    if not client:
-                        res = {"status": "error", "message": "Not attached"}
-                    else:
-                        with client.op_lock:
-                            stopped = client.step(dap_cmd, int(thread_id))
-                        if stopped:
-                            res = {"status": "success", "stopped": stopped}
+                    # threadId 可選，未提供時自動 fetch
+                    thread_id = qs.get('threadId', [None])[0]
+                    with client.op_lock:
+                        tid = int(thread_id) if thread_id else client.get_thread_id()
+                        if not tid:
+                            res = {"status": "error", "message": "No thread found"}
                         else:
-                            res = {"status": "error", "message": "Timed out waiting for stopped event"}
+                            stopped = client.step(dap_cmd, tid)
+                            if stopped:
+                                res = {"status": "success", "stopped": stopped, "threadId": tid}
+                            else:
+                                res = {"status": "error", "message": "Timed out waiting for stopped event"}
             else:
                 self.send_response(404)
                 self.end_headers()
