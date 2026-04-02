@@ -22,10 +22,14 @@ import json
 import time
 import sys
 import os
+import random
 import threading
 from queue import Queue, Empty
 from http.server import HTTPServer, BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
+
+_HEARTBEAT_BASE    = 30   # 秒，心跳基礎間隔
+_HEARTBEAT_JITTER  =  8   # 秒，jitter 半徑 → 實際 timeout ∈ [22, 38]
 
 
 class AsyncDAPClient:
@@ -38,7 +42,7 @@ class AsyncDAPClient:
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         print(f"[*] Connecting to DAP Target at {host}:{port}...")
         self.sock.connect((host, port))
-        self.sock.settimeout(30)   # recv 超過 30s 無資料 → 觸發心跳偵測
+        self.sock.settimeout(self._jittered_timeout())  # 初始 jitter timeout
         self.seq = 1
         self.responses = {}
         self.events = Queue()
@@ -57,6 +61,11 @@ class AsyncDAPClient:
         self.sock.sendall(header + body)
         self.seq += 1
         return req_seq
+
+    @staticmethod
+    def _jittered_timeout():
+        """回傳帶 jitter 的心跳 timeout，避免多 process 同時觸發心跳造成堵塞。"""
+        return _HEARTBEAT_BASE + random.uniform(-_HEARTBEAT_JITTER, _HEARTBEAT_JITTER)
 
     def _ping(self):
         """送一個輕量 DAP threads 請求，3 秒內有回應則視為存活。"""
@@ -105,7 +114,8 @@ class AsyncDAPClient:
                     if self.on_disconnect:
                         self.on_disconnect(self.host, self.port)
                     break
-                # ping 通，繼續等
+                # ping 通，重設下一輪 jitter timeout 繼續等
+                self.sock.settimeout(self._jittered_timeout())
 
             except Exception as e:
                 if self.event_callback:
