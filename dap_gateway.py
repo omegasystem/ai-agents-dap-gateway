@@ -38,6 +38,7 @@ class AsyncDAPClient:
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         print(f"[*] Connecting to DAP Target at {host}:{port}...")
         self.sock.connect((host, port))
+        self.sock.settimeout(30)   # recv 超過 30s 無資料 → 觸發心跳偵測
         self.seq = 1
         self.responses = {}
         self.events = Queue()
@@ -56,6 +57,14 @@ class AsyncDAPClient:
         self.sock.sendall(header + body)
         self.seq += 1
         return req_seq
+
+    def _ping(self):
+        """送一個輕量 DAP threads 請求，3 秒內有回應則視為存活。"""
+        try:
+            seq = self.send("threads")
+            return self.wait_for_response(seq, timeout=3) is not None
+        except Exception:
+            return False
 
     def _listen_loop(self):
         buffer = b""
@@ -84,14 +93,27 @@ class AsyncDAPClient:
                     self.events.put(msg)
                     if self.event_callback and msg.get("event") == "stopped":
                         self.event_callback(self.host, self.port, msg)
+
+            except TimeoutError:
+                # recv 超過 30s 沒有資料，送心跳確認存活
+                if not self._ping():
+                    if self.event_callback:
+                        self.event_callback(self.host, self.port, {
+                            "type": "event", "event": "gateway_error",
+                            "body": {"message": "heartbeat timeout — session declared dead"}
+                        })
+                    if self.on_disconnect:
+                        self.on_disconnect(self.host, self.port)
+                    break
+                # ping 通，繼續等
+
             except Exception as e:
                 if self.event_callback:
-                    error_event = {
+                    self.event_callback(self.host, self.port, {
                         "type": "event",
                         "event": "gateway_error",
                         "body": {"message": str(e)}
-                    }
-                    self.event_callback(self.host, self.port, error_event)
+                    })
                 if self.on_disconnect:
                     self.on_disconnect(self.host, self.port)
                 break
