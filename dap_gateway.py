@@ -202,6 +202,15 @@ class AsyncDAPClient:
         resp = self.wait_for_response(seq)
         return resp is not None and resp.get("success", False)
 
+    def push_breakpoints_to_dap(self, file_path, lines):
+        """將指定行號推送到 DAP（不更新快取，用於 enable/disable 還原）。"""
+        seq = self.send("setBreakpoints", {
+            "source": {"path": file_path},
+            "breakpoints": [{"line": l} for l in lines],
+        })
+        resp = self.wait_for_response(seq)
+        return resp is not None and resp.get("success", False)
+
     def pause(self):
         tid = self.get_thread_id()
         if tid:
@@ -482,6 +491,47 @@ class GatewayAPIHandler(BaseHTTPRequestHandler):
                             with gateway.lock:
                                 gateway.session_meta.get(key, {}).get("breakpoints", {}).pop(file_path, None)
                         res = {"status": "success"} if ok else {"status": "error", "message": "clearBreakpoints failed"}
+
+            elif parsed.path == '/breakpoints/disable' and port:
+                # 停用所有斷點：DAP 清空，但 cache 保留，標記 disabled
+                with gateway.lock:
+                    client = gateway.sessions.get(key)
+                    meta = gateway.session_meta.get(key, {})
+                if not client:
+                    res = {"status": "error", "message": "Not attached"}
+                elif meta.get("breakpoints_disabled"):
+                    res = {"status": "ok", "message": "Already disabled"}
+                else:
+                    bp_cache = meta.get("breakpoints", {})
+                    failed = []
+                    for fp in bp_cache:
+                        if not client.clear_breakpoints(fp):
+                            failed.append(fp)
+                    with gateway.lock:
+                        gateway.session_meta[key]["breakpoints_disabled"] = True
+                    res = {"status": "success", "disabled_files": list(bp_cache.keys()), "failed": failed}
+
+            elif parsed.path == '/breakpoints/enable' and port:
+                # 恢復所有斷點：從 cache 重新推送到 DAP
+                with gateway.lock:
+                    client = gateway.sessions.get(key)
+                    meta = gateway.session_meta.get(key, {})
+                if not client:
+                    res = {"status": "error", "message": "Not attached"}
+                elif not meta.get("breakpoints_disabled"):
+                    res = {"status": "ok", "message": "Already enabled"}
+                else:
+                    bp_cache = meta.get("breakpoints", {})
+                    restored, failed = [], []
+                    for fp, confirmed_list in bp_cache.items():
+                        lines = [bp["line"] for bp in confirmed_list if "line" in bp]
+                        if lines and client.push_breakpoints_to_dap(fp, lines):
+                            restored.append(fp)
+                        else:
+                            failed.append(fp)
+                    with gateway.lock:
+                        gateway.session_meta[key]["breakpoints_disabled"] = False
+                    res = {"status": "success", "restored_files": restored, "failed": failed}
 
             else:
                 self.send_response(404)

@@ -128,6 +128,15 @@ curl -X POST "http://127.0.0.1:5680/breakpoint/clear?host=127.0.0.1&port=45123&f
 
 > Once a breakpoint is hit, the SSE stream will emit a `stopped` event with `reason: "breakpoint"`. You can then call `/snapshot` or start stepping.
 
+**Bypass all breakpoints temporarily (without losing them):**
+```bash
+# Disable — process will run through all breakpoints without stopping
+curl -X POST "http://127.0.0.1:5680/breakpoints/disable?host=127.0.0.1&port=45123"
+
+# Re-enable — restores all breakpoints from cache back to DAP
+curl -X POST "http://127.0.0.1:5680/breakpoints/enable?host=127.0.0.1&port=45123"
+```
+
 ### 8. Step Execution (The "Single Frame Advance")
 
 `threadId` is optional — the gateway auto-fetches it if omitted.
@@ -186,6 +195,8 @@ All endpoints (except `/status`) support `?host=<TARGET_IP>` and `?port=<DAP_POR
 | `POST` | `/breakpoint` | Set breakpoints. Requires `?file=<abs_path>&lines=10,20,30`. Returns DAP-confirmed breakpoint list. |
 | `POST` | `/breakpoint/clear` | Clear all breakpoints in a file. Requires `?file=<abs_path>`. |
 | `GET` | `/breakpoints` | List currently set breakpoints for a file. Requires `?file=<abs_path>`. |
+| `POST` | `/breakpoints/disable` | **Bypass all breakpoints** — clears from DAP but keeps cache. Process runs through without stopping. |
+| `POST` | `/breakpoints/enable` | **Restore all breakpoints** — re-pushes cached breakpoints to DAP. |
 
 ---
 
