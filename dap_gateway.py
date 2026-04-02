@@ -467,10 +467,13 @@ class GatewayAPIHandler(BaseHTTPRequestHandler):
                         else:
                             confirmed = client.set_breakpoint(file_path, lines)
                             if confirmed is not None:
-                                # 快取至 session_meta 供 GET /breakpoints 查詢
+                                # 同時存 DAP confirmed 物件 + 原始 lines（restore 時用）
                                 with gateway.lock:
                                     gateway.session_meta.setdefault(key, {}) \
-                                        .setdefault("breakpoints", {})[file_path] = confirmed
+                                        .setdefault("breakpoints", {})[file_path] = {
+                                            "lines": lines,
+                                            "confirmed": confirmed,
+                                        }
                                 res = {"status": "success", "breakpoints": confirmed}
                             else:
                                 res = {"status": "error", "message": "setBreakpoints failed"}
@@ -523,8 +526,11 @@ class GatewayAPIHandler(BaseHTTPRequestHandler):
                 else:
                     bp_cache = meta.get("breakpoints", {})
                     restored, failed = [], []
-                    for fp, confirmed_list in bp_cache.items():
-                        lines = [bp["line"] for bp in confirmed_list if "line" in bp]
+                    for fp, bp_data in bp_cache.items():
+                        # 優先用原始 lines，fallback 到 DAP confirmed 物件
+                        lines = bp_data.get("lines") if isinstance(bp_data, dict) else None
+                        if not lines and isinstance(bp_data, list):
+                            lines = [bp["line"] for bp in bp_data if "line" in bp]
                         if lines and client.push_breakpoints_to_dap(fp, lines):
                             restored.append(fp)
                         else:
@@ -666,8 +672,13 @@ class GatewayAPIHandler(BaseHTTPRequestHandler):
                         # DAP 無原生 getBreakpoints，用 session_meta 快取
                         bp_key = f"{key}:breakpoints:{file_path}"
                         cached = gateway.session_meta.get(key, {}).get("breakpoints", {})
-                        res = {"status": "success", "file": file_path,
-                               "breakpoints": cached.get(file_path, [])}
+                        bp_data = cached.get(file_path, {})
+                        res = {
+                            "status": "success", "file": file_path,
+                            "lines": bp_data.get("lines", []) if isinstance(bp_data, dict) else [],
+                            "confirmed": bp_data.get("confirmed", []) if isinstance(bp_data, dict) else [],
+                            "disabled": gateway.session_meta.get(key, {}).get("breakpoints_disabled", False),
+                        }
 
             elif parsed.path == '/sessions':
                 with gateway.lock:
