@@ -486,6 +486,14 @@ class GatewayAPIHandler(BaseHTTPRequestHandler):
                     while True:
                         try:
                             event_msg = q.get(timeout=30)
+                            if snapshot_flag and event_msg.get('event') == 'stopped':
+                                session_key = event_msg.get('session')
+                                if session_key:
+                                    with gateway.lock:
+                                        client = gateway.sessions.get(session_key)
+                                    if client:
+                                        with client.op_lock:
+                                            event_msg['snapshot'] = client.get_snapshot()
                             payload = f"data: {json.dumps(event_msg, ensure_ascii=False)}\n\n"
                             self.wfile.write(payload.encode('utf-8'))
                             self.wfile.flush()
