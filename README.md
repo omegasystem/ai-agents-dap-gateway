@@ -47,17 +47,48 @@ python3 dap_launcher.py example_target.py
 
 ### 4. Global Event Stream — Single Connection, All Sessions (The "God's Eye")
 
-Monitor every session from one SSE connection. No need to open one stream per process.
+Perfect for AI Agents to monitor the entire grid.
 
 ```bash
-curl -N "http://127.0.0.1:5680/events/global"
+curl -N "http://127.0.0.1:5680/events/global?snapshot=true"
 ```
 
-Example output:
-```
-data: {"type": "event", "event": "session_attached", "session": "192.168.1.5:45123", "target": "train.py", "body": {"attached_at": "2026-04-02T15:00:00"}}
-data: {"type": "event", "event": "stopped", "session": "192.168.1.5:45123", "target": "train.py", "body": {...}}
-data: {"type": "event", "event": "terminated", "session": "192.168.1.5:45123", "target": "train.py", "body": {}}
+**Example Event Output (with snapshot):**
+```json
+data: {"type": "event", "event": "session_attached", "session": "172.21.137.76:60741", "target": "test_target.py", "body": {"attached_at": "2026-04-02T13:40:50"}}
+
+data: {
+  "seq": 33,
+  "type": "event",
+  "event": "stopped",
+  "body": {
+    "reason": "pause",
+    "threadId": 1,
+    "preserveFocusHint": true,
+    "allThreadsStopped": true
+  },
+  "session": "172.21.137.76:60741",
+  "target": "test_target.py",
+  "snapshot": {
+    "base_value": {
+      "value": "1.618"
+    },
+    "current_status": {
+      "value": "'Processing particle 58, Total Entropy: 208.37'"
+    },
+    "entropy": {
+      "value": "208.36535889844916"
+    },
+    "i": {
+      "value": "59"
+    },
+    "particles": {
+      "value": "[{'id': 1, 'energy': 0.481}, ... {'id': 58, 'energy': 208.36}]",
+      "__expandable__": true,
+      "__ref__": 9
+    }
+  }
+}
 ```
 
 ### 5. Real-Time Event Listening — Per Session (The "Nervous System")
