@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+
 """
 AI Agent DAP Gateway — REST overhead evaluation (v2.0)
 
@@ -21,6 +23,10 @@ import socket
 import json
 import time
 import sys
+sys.stdout.reconfigure(line_buffering=True)
+sys.stderr.reconfigure(line_buffering=True)
+sys.stdout.reconfigure(line_buffering=True)
+sys.stderr.reconfigure(line_buffering=True)
 import os
 import random
 import threading
@@ -96,6 +102,8 @@ class AsyncDAPClient:
                 buffer = buffer[length:]
 
                 msg = json.loads(body.decode('utf-8'))
+                self._ping_sent = False
+                self.sock.settimeout(self._jittered_timeout())
                 if msg.get("type") == "response":
                     self.responses[msg.get("request_seq")] = msg
                 elif msg.get("type") == "event":
@@ -104,8 +112,7 @@ class AsyncDAPClient:
                         self.event_callback(self.host, self.port, msg)
 
             except TimeoutError:
-                # recv 超過 30s 沒有資料，送心跳確認存活
-                if not self._ping():
+                if getattr(self, "_ping_sent", False):
                     if self.event_callback:
                         self.event_callback(self.host, self.port, {
                             "type": "event", "event": "gateway_error",
@@ -114,8 +121,13 @@ class AsyncDAPClient:
                     if self.on_disconnect:
                         self.on_disconnect(self.host, self.port)
                     break
-                # ping 通，重設下一輪 jitter timeout 繼續等
-                self.sock.settimeout(self._jittered_timeout())
+                
+                self._ping_sent = True
+                try:
+                    self.send("threads")
+                    self.sock.settimeout(3)
+                except Exception:
+                    break
 
             except Exception as e:
                 if self.event_callback:

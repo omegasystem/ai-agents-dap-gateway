@@ -30,12 +30,12 @@ pip install -r requirements.txt
 ### 2. Start the Gateway (The "Control Plane")
 Run this in a background terminal. It listens on Port `5680` for REST API commands.
 ```bash
-python3 dap_gateway.py
+python3 -u dap_gateway.py
 ```
 
 Optionally enable auth:
 ```bash
-DAP_AUTH_TOKEN=mysecret python3 dap_gateway.py
+DAP_AUTH_TOKEN=mysecret python3 -u dap_gateway.py
 ```
 
 ### 3. Launch a Target Script (The "Probe")
@@ -122,7 +122,7 @@ Set the `DAP_AUTH_TOKEN` environment variable to enable token-based auth. All `P
 
 ```bash
 # Start gateway with auth
-DAP_AUTH_TOKEN=mysecret python3 dap_gateway.py
+DAP_AUTH_TOKEN=mysecret python3 -u dap_gateway.py
 
 # Make authenticated requests
 curl -X POST -H "X-DAP-Token: mysecret" "http://127.0.0.1:5680/pause?port=45123"
