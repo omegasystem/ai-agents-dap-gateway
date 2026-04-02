@@ -216,27 +216,56 @@ class AsyncDAPClient:
 class DAPGatewayManager:
     def __init__(self):
         self.sessions = {}
-        self.session_meta = {}   # key -> {"target": filename, "attached_at": timestamp}
-        self.event_queues = {}
+        self.session_meta = {}        # key -> {"target": filename, "attached_at": timestamp}
+        self.event_queues = {}        # key -> [Queue, ...]  per-session SSE subscribers
+        self.global_event_queues = [] # [Queue, ...]  global SSE subscribers
         self.lock = threading.Lock()
+
+    def _enrich(self, host, port, event_msg):
+        """Attach session + target metadata to an event for global broadcast."""
+        key = f"{host}:{port}"
+        meta = self.session_meta.get(key, {})
+        enriched = dict(event_msg)
+        enriched["session"] = key
+        enriched["target"] = meta.get("target", "unknown")
+        return enriched
 
     def _broadcast_event(self, host, port, event_msg):
         key = f"{host}:{port}"
+        enriched = self._enrich(host, port, event_msg)
         with self.lock:
+            # per-session subscribers
             if key in self.event_queues:
                 for q in self.event_queues[key]:
                     q.put(event_msg)
+            # global subscribers
+            for q in self.global_event_queues:
+                q.put(enriched)
+
+    def _broadcast_global(self, event_msg):
+        """Push a lifecycle event directly to global subscribers only."""
+        with self.lock:
+            for q in self.global_event_queues:
+                q.put(event_msg)
 
     def _on_disconnect(self, host, port):
         key = f"{host}:{port}"
         meta = self.session_meta.get(key, {})
-        terminated = {"type": "event", "event": "terminated", "body": {"target": meta.get("target", "unknown")}}
+        terminated = {
+            "type": "event", "event": "terminated",
+            "session": key, "target": meta.get("target", "unknown"),
+            "body": {}
+        }
         with self.lock:
             self.sessions.pop(key, None)
             self.session_meta.pop(key, None)
+            # per-session subscribers
             if key in self.event_queues:
                 for q in self.event_queues[key]:
-                    q.put(terminated)
+                    q.put({"type": "event", "event": "terminated", "body": {}})
+            # global subscribers
+            for q in self.global_event_queues:
+                q.put(terminated)
 
     def attach(self, host, port, target=None):
         key = f"{host}:{port}"
@@ -255,6 +284,11 @@ class DAPGatewayManager:
                     "target": target or "unknown",
                     "attached_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
                 }
+            self._broadcast_global({
+                "type": "event", "event": "session_attached",
+                "session": key, "target": target or "unknown",
+                "body": {"attached_at": self.session_meta[key]["attached_at"]},
+            })
             return {"status": "success", "message": f"Attached to {key}", "target": target}
         except Exception as e:
             return {"status": "error", "message": str(e)}
@@ -263,10 +297,16 @@ class DAPGatewayManager:
         key = f"{host}:{port}"
         with self.lock:
             if key in self.sessions:
+                meta = self.session_meta.get(key, {})
                 self.sessions[key].close()
                 del self.sessions[key]
-                return {"status": "success", "message": f"Detached from {key}"}
-        return {"status": "error", "message": "Not attached"}
+                self.session_meta.pop(key, None)
+        self._broadcast_global({
+            "type": "event", "event": "session_detached",
+            "session": key, "target": meta.get("target", "unknown"),
+            "body": {},
+        })
+        return {"status": "success", "message": f"Detached from {key}"}
 
 
 gateway = DAPGatewayManager()
@@ -389,6 +429,32 @@ class GatewayAPIHandler(BaseHTTPRequestHandler):
                             gateway.event_queues[key].remove(q)
                 return
 
+            elif parsed.path == '/events/global':
+                self.send_response(200)
+                self.send_header('Content-type', 'text/event-stream')
+                self.send_header('Cache-Control', 'no-cache')
+                self.send_header('Connection', 'keep-alive')
+                self.end_headers()
+                q = Queue()
+                with gateway.lock:
+                    gateway.global_event_queues.append(q)
+                try:
+                    while True:
+                        try:
+                            event_msg = q.get(timeout=30)
+                            payload = f"data: {json.dumps(event_msg, ensure_ascii=False)}\n\n"
+                            self.wfile.write(payload.encode('utf-8'))
+                            self.wfile.flush()
+                        except Empty:
+                            self.wfile.write(b": keep-alive\n\n")
+                            self.wfile.flush()
+                except (ConnectionResetError, BrokenPipeError):
+                    pass
+                finally:
+                    with gateway.lock:
+                        gateway.global_event_queues.remove(q)
+                return
+
             elif parsed.path == '/snapshot' and port:
                 with gateway.lock:
                     client = gateway.sessions.get(key)
@@ -454,7 +520,7 @@ class GatewayAPIHandler(BaseHTTPRequestHandler):
 
 def run():
     print("==================================================")
-    print(" [AI Agent DAP Gateway] Multi-threaded v2.0")
+    print(" [AI Agent DAP Gateway] Multi-threaded v2.1")
     print(" SSE supports ?snapshot=true for auto-capture")
     print("==================================================")
     server = ThreadingHTTPServer(('0.0.0.0', 5680), GatewayAPIHandler)

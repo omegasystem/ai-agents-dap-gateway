@@ -45,14 +45,29 @@ python3 dap_launcher.py example_target.py
 ```
 *(Optionally use `DAP_GATEWAY_HOST` to specify the Gateway address)*
 
-### 4. Real-Time Event Listening (The "Nervous System")
+### 4. Global Event Stream — Single Connection, All Sessions (The "God's Eye")
+
+Monitor every session from one SSE connection. No need to open one stream per process.
+
+```bash
+curl -N "http://127.0.0.1:5680/events/global"
+```
+
+Example output:
+```
+data: {"type": "event", "event": "session_attached", "session": "192.168.1.5:45123", "target": "train.py", "body": {"attached_at": "2026-04-02T15:00:00"}}
+data: {"type": "event", "event": "stopped", "session": "192.168.1.5:45123", "target": "train.py", "body": {...}}
+data: {"type": "event", "event": "terminated", "session": "192.168.1.5:45123", "target": "train.py", "body": {}}
+```
+
+### 5. Real-Time Event Listening — Per Session (The "Nervous System")
 Subscribe to real-time events (SSE). When a breakpoint is hit, the Gateway pushes the notification instantly. Use `snapshot=true` for automatic variable capture.
 
 ```bash
 curl -N -H "Accept: text/event-stream" "http://127.0.0.1:5680/events?host=127.0.0.1&port=45123&snapshot=true"
 ```
 
-### 5. Extract Runtime Variables (The "God Mode")
+### 6. Extract Runtime Variables (The "God Mode")
 Manually extract the local variables of the running script via a simple `curl` command.
 
 ```bash
@@ -65,7 +80,7 @@ Variables containing objects/dicts/lists are marked with `__expandable__: true` 
 curl "http://127.0.0.1:5680/expand?host=127.0.0.1&port=45123&ref=1234"
 ```
 
-### 6. Step Execution (The "Single Frame Advance")
+### 7. Step Execution (The "Single Frame Advance")
 
 ```bash
 # Step over (next line)
@@ -87,7 +102,8 @@ All endpoints (except `/status`) support `?host=<TARGET_IP>` and `?port=<DAP_POR
 | Method | Endpoint | Description |
 | :--- | :--- | :--- |
 | `GET` | `/status` | List all active attached sessions. |
-| `GET` | `/events` | **SSE Stream**. Pushes real-time events: `stopped`, `terminated`, `gateway_error`. Supports `?snapshot=true`. |
+| `GET` | `/events` | **SSE Stream** (per-session). Pushes real-time events: `stopped`, `terminated`, `gateway_error`. Supports `?snapshot=true`. |
+| `GET` | `/events/global` | **Global SSE Stream**. Single connection observes ALL sessions. Every event includes `session` (host:port) and `target` (filename). Lifecycle events: `session_attached`, `session_detached`, `terminated`. No `?host`/`?port` needed. |
 | `POST` | `/attach` | Manually attach the Gateway to a remote listening debugpy port. |
 | `POST` | `/detach` | Disconnect the Gateway from the target. |
 | `POST` | `/pause` | Freeze the target execution thread (Time Stop). |
