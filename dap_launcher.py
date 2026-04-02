@@ -3,6 +3,7 @@ import debugpy
 import runpy
 import socket
 import urllib.request
+import urllib.parse
 import threading
 import time
 import os
@@ -27,10 +28,11 @@ def register_to_gateway(host, port, target):
     time.sleep(1)
     try:
         gateway_host = os.environ.get("DAP_GATEWAY_HOST", "127.0.0.1")
-        url = f"http://{gateway_host}:5680/attach?host={host}&port={port}"
+        encoded_target = urllib.parse.quote(os.path.basename(target))
+        url = f"http://{gateway_host}:5680/attach?host={host}&port={port}&target={encoded_target}"
         req = urllib.request.Request(url, method="POST")
         urllib.request.urlopen(req)
-        print(f"[DAP Launcher] ✅ Successfully registered to Gateway (Target: {host}:{port})")
+        print(f"[DAP Launcher] ✅ Successfully registered to Gateway (Target: {host}:{port} | File: {target})")
     except Exception as e:
         print(f"[DAP Launcher] ⚠️ Warning: Failed to connect to Gateway. - {e}")
 

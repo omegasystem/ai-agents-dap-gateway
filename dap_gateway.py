@@ -216,6 +216,7 @@ class AsyncDAPClient:
 class DAPGatewayManager:
     def __init__(self):
         self.sessions = {}
+        self.session_meta = {}   # key -> {"target": filename, "attached_at": timestamp}
         self.event_queues = {}
         self.lock = threading.Lock()
 
@@ -228,14 +229,16 @@ class DAPGatewayManager:
 
     def _on_disconnect(self, host, port):
         key = f"{host}:{port}"
-        terminated = {"type": "event", "event": "terminated"}
+        meta = self.session_meta.get(key, {})
+        terminated = {"type": "event", "event": "terminated", "body": {"target": meta.get("target", "unknown")}}
         with self.lock:
             self.sessions.pop(key, None)
+            self.session_meta.pop(key, None)
             if key in self.event_queues:
                 for q in self.event_queues[key]:
                     q.put(terminated)
 
-    def attach(self, host, port):
+    def attach(self, host, port, target=None):
         key = f"{host}:{port}"
         with self.lock:
             if key in self.sessions:
@@ -248,7 +251,11 @@ class DAPGatewayManager:
             )
             with self.lock:
                 self.sessions[key] = client
-            return {"status": "success", "message": f"Attached to {key}"}
+                self.session_meta[key] = {
+                    "target": target or "unknown",
+                    "attached_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                }
+            return {"status": "success", "message": f"Attached to {key}", "target": target}
         except Exception as e:
             return {"status": "error", "message": str(e)}
 
@@ -291,7 +298,8 @@ class GatewayAPIHandler(BaseHTTPRequestHandler):
             key = f"{host}:{port}"
 
             if parsed.path == '/attach' and port:
-                res = gateway.attach(host, port)
+                target = qs.get('target', [None])[0]
+                res = gateway.attach(host, port, target=target)
             elif parsed.path == '/detach' and port:
                 res = gateway.detach(host, port)
             elif parsed.path == '/pause' and port:
@@ -408,9 +416,24 @@ class GatewayAPIHandler(BaseHTTPRequestHandler):
                         expanded = client.expand_ref(int(ref))
                         res = {"status": "success", "variables": expanded}
 
+            elif parsed.path == '/sessions':
+                with gateway.lock:
+                    res = {
+                        "status": "running",
+                        "sessions": {
+                            key: gateway.session_meta.get(key, {})
+                            for key in gateway.sessions
+                        }
+                    }
             elif parsed.path == '/status':
                 with gateway.lock:
-                    res = {"status": "running", "sessions": list(gateway.sessions.keys())}
+                    res = {
+                        "status": "running",
+                        "sessions": {
+                            key: gateway.session_meta.get(key, {})
+                            for key in gateway.sessions
+                        }
+                    }
             else:
                 self.send_response(404)
                 self.end_headers()
